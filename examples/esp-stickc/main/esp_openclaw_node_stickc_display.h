@@ -42,8 +42,10 @@
 /* Power latch: hold HIGH for battery operation on the Plus2. */
 #define STICKC_PIN_POWER_LATCH 4
 
-typedef struct _lv_display_t lv_display_t;
-typedef struct _lv_obj_t lv_obj_t;
+/* Forward declarations matching LVGL 9.x's own typedefs in lv_types.h, so
+ * this header can be included with or without lvgl.h already in scope. */
+typedef struct lv_display_t lv_display_t;
+typedef struct lv_obj_t lv_obj_t;
 
 /**
  * @brief Display state shared by the M5StickC Plus2 example modules.

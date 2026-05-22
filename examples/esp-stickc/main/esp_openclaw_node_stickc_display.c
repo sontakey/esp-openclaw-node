@@ -79,8 +79,21 @@ static esp_err_t init_lcd_backlight(void)
     return ESP_OK;
 }
 
+/* esp_lcd panel-IO callback: fired from the SPI DMA ISR when a colour
+ * transfer finishes.  It releases the LVGL draw buffer for reuse. */
+static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t io,
+                                    esp_lcd_panel_io_event_data_t *edata,
+                                    void *user_ctx)
+{
+    (void)io;
+    (void)edata;
+    lv_display_flush_ready((lv_display_t *)user_ctx);
+    return false;
+}
+
 static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
-                                  esp_lcd_panel_io_handle_t *out_io)
+                                  esp_lcd_panel_io_handle_t *out_io,
+                                  lv_display_t *lv_disp)
 {
     /* SPI bus configuration for the M5StickC Plus2 LCD. */
     spi_bus_config_t buscfg = {
@@ -104,8 +117,8 @@ static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
         .lcd_param_bits = 8,
         .spi_mode = 0,
         .trans_queue_depth = 10,
-        .on_color_trans_done = NULL,
-        .user_ctx = NULL,
+        .on_color_trans_done = notify_lvgl_flush_ready,
+        .user_ctx = lv_disp,
     };
     esp_lcd_panel_io_handle_t io_handle = NULL;
     ESP_RETURN_ON_ERROR(
@@ -134,12 +147,16 @@ static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "LCD panel reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "LCD panel init failed");
 
-    /* Mirror horizontally and vertically so the display orientation matches
-     * the M5StickC Plus2 physical layout (USB-C at the bottom). */
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, true, true), TAG, "LCD panel mirror failed");
+    /* The ST7789v2 on the M5StickC Plus2 expects display inversion ON;
+     * without it every colour renders as a photo-negative. */
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(panel, true), TAG, "LCD panel invert failed");
 
-    /* Swap X/Y to match portrait orientation. */
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, true), TAG, "LCD panel swap_xy failed");
+    /* Portrait 135x240 in the panel's default MADCTL orientation: no axis
+     * swap, no mirror.  The LVGL display is created 135 wide x 240 tall to
+     * match, and the gap offsets below assume this orientation.  (If the
+     * image appears rotated 180 deg, change both flags to true.) */
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(panel, false), TAG, "LCD panel swap_xy failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(panel, false, false), TAG, "LCD panel mirror failed");
 
     /* Apply the gap offsets that centre the 135x240 visible window inside
      * the ST7789's 240x320 native resolution. */
@@ -158,17 +175,23 @@ static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
 /*  LVGL integration                                                      */
 /* ---------------------------------------------------------------------- */
 
-/* LVGL port flush callback: copies pixels from the LVGL buffer to the LCD. */
+/* LVGL port flush callback: copies pixels from the LVGL buffer to the LCD.
+ *
+ * esp_lcd_panel_draw_bitmap() only *queues* an SPI DMA transfer; the pixels
+ * are still being read out of px_map after it returns.  lv_display_flush_ready()
+ * must therefore wait until the transfer actually completes, which is signalled
+ * asynchronously by notify_lvgl_flush_ready() below. */
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel = lv_display_get_user_data(disp);
-    int offset_x1 = area->x1;
-    int offset_y1 = area->y1;
-    int offset_x2 = area->x2;
-    int offset_y2 = area->y2;
 
-    esp_lcd_panel_draw_bitmap(panel, offset_x1, offset_y1, offset_x2 + 1, offset_y2 + 1, px_map);
-    lv_display_flush_ready(disp);
+    /* LVGL renders RGB565 little-endian, but the ST7789 latches the high
+     * byte first.  Without this swap the colours come out scrambled
+     * (e.g. the dark-navy background renders as yellow). */
+    uint32_t px_count = (uint32_t)(area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    lv_draw_sw_rgb565_swap(px_map, px_count);
+
+    esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 
 /* LVGL tick timer callback.  Called every 5 ms to keep lv_tick in sync. */
@@ -320,10 +343,21 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     /* Hold the power latch HIGH so the device stays on when powered by battery. */
     ESP_RETURN_ON_ERROR(init_power_latch(), TAG, "power latch init failed");
 
+    /* Initialise the LVGL core.  This must run before any other lv_* call. */
+    lv_init();
+
+    /* Create the LVGL display object up front: the LCD panel IO needs its
+     * handle as user_ctx so the SPI DMA callback can signal flush-complete. */
+    lv_display_t *lv_disp = lv_display_create(STICKC_LCD_H_RES, STICKC_LCD_V_RES);
+    if (lv_disp == NULL) {
+        ESP_LOGE(TAG, "failed to create LVGL display");
+        return ESP_FAIL;
+    }
+
     /* Create the ST7789 LCD panel with M5StickC Plus2 offsets. */
     esp_lcd_panel_handle_t lcd_panel = NULL;
     esp_lcd_panel_io_handle_t lcd_io = NULL;
-    ESP_RETURN_ON_ERROR(create_lcd_panel(&lcd_panel, &lcd_io), TAG, "LCD panel creation failed");
+    ESP_RETURN_ON_ERROR(create_lcd_panel(&lcd_panel, &lcd_io, lv_disp), TAG, "LCD panel creation failed");
 
     /* Turn the backlight on *before* starting LVGL so the user sees
      * something as early as possible.  This is a common blank-screen
@@ -331,21 +365,13 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
      * panel stays dark even though it is rendering correctly. */
     ESP_RETURN_ON_ERROR(init_lcd_backlight(), TAG, "backlight init failed");
 
-    /* Initialize LVGL with the esp_lcd ST7789 panel as the display backend. */
+    /* Allocate the LVGL draw buffer: CONFIG_STICKC_LCD_DRAW_BUF_HEIGHT rows
+     * at 16 bits per pixel (RGB565).  The buffer is handed straight to the
+     * SPI DMA engine, so it must live in internal DMA-capable RAM.  At
+     * 135 x 20 x 2 bytes this is only ~5 KB, so PSRAM is not needed. */
     const int draw_buf_height = CONFIG_STICKC_LCD_DRAW_BUF_HEIGHT;
-    lv_display_t *lv_disp = lv_display_create(STICKC_LCD_H_RES, STICKC_LCD_V_RES);
-    if (lv_disp == NULL) {
-        return ESP_FAIL;
-    }
-
-    /* Allocate the draw buffer.  16 bits per pixel (RGB565).
-     * Use PSRAM since the M5StickC Plus2 has 2 MB available. */
     size_t draw_buf_size = STICKC_LCD_H_RES * draw_buf_height * 2;
-    uint8_t *draw_buf = heap_caps_malloc(draw_buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (draw_buf == NULL) {
-        /* Fall back to internal DMA-capable memory if PSRAM is unavailable. */
-        draw_buf = heap_caps_malloc(draw_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    }
+    uint8_t *draw_buf = heap_caps_malloc(draw_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (draw_buf == NULL) {
         ESP_LOGE(TAG, "failed to allocate LVGL draw buffer (%zu bytes)", draw_buf_size);
         return ESP_ERR_NO_MEM;
@@ -374,11 +400,12 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     create_display_ui_locked(display);
     stickc_lvgl_unlock();
 
-    /* Start the LVGL task.  It calls lv_timer_handler() in a loop. */
+    /* Start the LVGL task.  It calls lv_timer_handler() in a loop.
+     * 8 KB of stack: LVGL 9 glyph rendering and flex layout overflow 4 KB. */
     BaseType_t task_created = xTaskCreate(
         lvgl_task,
         "lvgl",
-        4096,
+        8192,
         NULL,
         2,
         NULL);
