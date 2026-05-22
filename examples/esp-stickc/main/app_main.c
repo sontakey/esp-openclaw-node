@@ -73,7 +73,7 @@ void app_main(void)
 
     esp_openclaw_node_config_t node_config = {0};
     esp_openclaw_node_config_init_default(&node_config);
-    node_config.display_name = "OpenClaw M5StickC Plus2";
+    node_config.display_name = "stick";
     node_config.event_cb = handle_node_event;
     node_config.event_user_ctx = &s_saved_session_reconnect;
     ESP_ERROR_CHECK(esp_openclaw_node_create(&node_config, &s_node));
