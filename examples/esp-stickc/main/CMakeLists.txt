@@ -10,12 +10,14 @@ idf_component_register(
         "esp_openclaw_node_stickc_cmd.c"
         "esp_openclaw_node_stickc_display.c"
         "esp_openclaw_node_stickc_display_node_cmd.c"
+        "esp_openclaw_node_stickc_hw_node_cmd.c"
     INCLUDE_DIRS
         "."
         "../../common"
     REQUIRES
         esp-openclaw-node
         driver
+        esp_adc
         esp_lcd
         esp_app_format
         console
