@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: component-unity-tests
+            path: components/esp-openclaw-node/test_apps/esp_openclaw_node_unity_tests
+            target: esp32s3
+          - name: esp32-node
+            path: examples/esp32-node
+            target: esp32s3
+          - name: esp-box-3-display
+            path: examples/esp-box-3-display
+            target: esp32s3
+
+    name: ${{ matrix.name }} (${{ matrix.target }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: release-v5.5
+          target: ${{ matrix.target }}
+          path: ${{ matrix.path }}
+          command: idf.py reconfigure && ninja -C build -j2
