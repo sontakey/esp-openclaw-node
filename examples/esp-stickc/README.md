@@ -61,7 +61,22 @@ Sample payload:
 }
 ```
 
-On boot, the screen shows a waiting message until the node is paired.
+On boot, the body area shows a waiting message until the node is paired.
+
+## Status Footer
+
+The bottom of the screen always shows a live status footer that the device
+renders on its own, with no gateway interaction required:
+
+- **Wi-Fi** the connected SSID, or `offline`
+- the device IPv4 address and current signal strength in dBm
+- **Gateway** the OpenClaw session state: `connecting`, `connected`, or `offline`
+- **Node** the short device id (use `openclaw nodes status --json` for the full id)
+
+Wi-Fi fields and signal strength refresh once per second; the gateway state
+updates from the node connect/disconnect events. `display.show` content from
+the gateway fills the area above the footer, so connection status stays
+visible at all times.
 
 ## Prepare The Gateway
 

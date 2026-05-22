@@ -25,10 +25,14 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "esp_openclaw_node_example_json.h"
+#include "esp_openclaw_node_wifi.h"
 
 static const char *TAG = "stickc_display";
 static const char *DEFAULT_HEADING = "OpenClaw";
 static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw gateway.";
+
+/* How often the status footer is repainted from live Wi-Fi/gateway state. */
+#define STICKC_STATUS_REFRESH_MS 1000
 
 /* LVGL mutex: protects all lv_* calls from concurrent access between the
  * LVGL task and the OpenClaw command handler. */
@@ -319,10 +323,72 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
 
     display->text_label = lv_label_create(display->container);
     lv_obj_set_width(display->text_label, lv_pct(100));
+    /* Let the body text take all the space between the heading and the
+     * footer, so the status footer stays pinned to the bottom edge. */
+    lv_obj_set_flex_grow(display->text_label, 1);
     lv_label_set_long_mode(display->text_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(display->text_label, lv_color_hex(0xcbd5e1), 0);
     lv_obj_set_style_text_line_space(display->text_label, 4, 0);
     lv_obj_set_style_text_font(display->text_label, &lv_font_montserrat_14, 0);
+
+    /* Always-on status footer: Wi-Fi, gateway link, signal, and node id. */
+    display->status_label = lv_label_create(display->container);
+    lv_obj_set_width(display->status_label, lv_pct(100));
+    lv_label_set_long_mode(display->status_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(display->status_label, lv_color_hex(0x94a3b8), 0);
+    lv_obj_set_style_text_line_space(display->status_label, 2, 0);
+    lv_obj_set_style_text_font(display->status_label, &lv_font_montserrat_14, 0);
+    /* A thin top rule separates the footer from the body text. */
+    lv_obj_set_style_border_color(display->status_label, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_border_side(display->status_label, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_width(display->status_label, 1, 0);
+    lv_obj_set_style_pad_top(display->status_label, 5, 0);
+}
+
+/* Repaint the status footer from live Wi-Fi state and the stored gateway
+ * state.  Must be called with the LVGL lock held. */
+static void refresh_status_footer_locked(esp_openclaw_node_stickc_display_t *display)
+{
+    if (display == NULL || display->status_label == NULL) {
+        return;
+    }
+
+    esp_openclaw_node_wifi_status_t wifi;
+    esp_openclaw_node_wifi_get_status(&wifi);
+
+    const char *gateway;
+    switch (display->gateway_state) {
+    case STICKC_GATEWAY_CONNECTED:
+        gateway = "connected";
+        break;
+    case STICKC_GATEWAY_OFFLINE:
+        gateway = "offline";
+        break;
+    default:
+        gateway = "connecting";
+        break;
+    }
+
+    const char *node_id = display->node_id[0] != '\0' ? display->node_id : "-";
+
+    char footer[160];
+    if (wifi.connected) {
+        snprintf(footer, sizeof(footer),
+                 "Wi-Fi  %s\n%s  %d dBm\nGateway  %s\nNode %s",
+                 wifi.ssid, wifi.ip, wifi.rssi, gateway, node_id);
+    } else {
+        snprintf(footer, sizeof(footer),
+                 "Wi-Fi  offline\nGateway  %s\nNode %s",
+                 gateway, node_id);
+    }
+    lv_label_set_text(display->status_label, footer);
+}
+
+/* LVGL timer callback: runs inside lv_timer_handler(), already under the
+ * LVGL lock, so it can repaint the footer directly. */
+static void status_refresh_timer_cb(lv_timer_t *timer)
+{
+    refresh_status_footer_locked(lv_timer_get_user_data(timer));
 }
 
 esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_display_t *display)
@@ -392,12 +458,15 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     display->lv_display = lv_disp;
     display->ready = true;
 
-    /* Render the initial UI under the LVGL lock. */
+    /* Render the initial UI and start the footer refresh timer under the
+     * LVGL lock. */
     if (!stickc_lvgl_lock(1000)) {
         ESP_LOGE(TAG, "LVGL lock timeout during initial UI render");
         return ESP_ERR_TIMEOUT;
     }
     create_display_ui_locked(display);
+    refresh_status_footer_locked(display);
+    lv_timer_create(status_refresh_timer_cb, STICKC_STATUS_REFRESH_MS, display);
     stickc_lvgl_unlock();
 
     /* Start the LVGL task.  It calls lv_timer_handler() in a loop.
@@ -416,4 +485,27 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
 
     display->last_render_ms = 0;
     return esp_openclaw_node_stickc_display_render(display, DEFAULT_HEADING, DEFAULT_TEXT);
+}
+
+void esp_openclaw_node_stickc_display_set_gateway_state(
+    esp_openclaw_node_stickc_display_t *display,
+    esp_openclaw_node_stickc_gateway_state_t state)
+{
+    if (display == NULL) {
+        return;
+    }
+    /* A plain aligned-word store; the footer refresh timer picks it up on
+     * its next tick, so no LVGL lock is needed here. */
+    display->gateway_state = state;
+}
+
+void esp_openclaw_node_stickc_display_set_node_id(
+    esp_openclaw_node_stickc_display_t *display,
+    const char *node_id)
+{
+    if (display == NULL) {
+        return;
+    }
+    snprintf(display->node_id, sizeof(display->node_id), "%s",
+             node_id != NULL ? node_id : "");
 }

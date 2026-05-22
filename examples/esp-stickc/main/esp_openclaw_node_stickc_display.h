@@ -42,10 +42,20 @@
 /* Power latch: hold HIGH for battery operation on the Plus2. */
 #define STICKC_PIN_POWER_LATCH 4
 
+/** @brief Number of device-id characters shown in the status footer. */
+#define STICKC_DISPLAY_NODE_ID_LEN 12
+
 /* Forward declarations matching LVGL 9.x's own typedefs in lv_types.h, so
  * this header can be included with or without lvgl.h already in scope. */
 typedef struct lv_display_t lv_display_t;
 typedef struct lv_obj_t lv_obj_t;
+
+/** @brief OpenClaw gateway session state shown in the status footer. */
+typedef enum {
+    STICKC_GATEWAY_CONNECTING = 0, /**< No session yet; a connect attempt is expected. */
+    STICKC_GATEWAY_CONNECTED,      /**< Handshake completed; the session is ready. */
+    STICKC_GATEWAY_OFFLINE,        /**< The session disconnected or a connect attempt failed. */
+} esp_openclaw_node_stickc_gateway_state_t;
 
 /**
  * @brief Display state shared by the M5StickC Plus2 example modules.
@@ -60,6 +70,9 @@ typedef struct {
     lv_obj_t *container; /**< Root LVGL container for the example screen. */
     lv_obj_t *heading_label; /**< LVGL label used for the heading line. */
     lv_obj_t *text_label; /**< LVGL label used for the body text block. */
+    lv_obj_t *status_label; /**< LVGL label for the always-on Wi-Fi/gateway status footer. */
+    esp_openclaw_node_stickc_gateway_state_t gateway_state; /**< Latest OpenClaw session state. */
+    char node_id[STICKC_DISPLAY_NODE_ID_LEN + 1]; /**< Short device id shown in the footer. */
 } esp_openclaw_node_stickc_display_t;
 
 /**
@@ -113,3 +126,29 @@ esp_err_t esp_openclaw_node_stickc_display_render(
 esp_err_t esp_openclaw_node_stickc_display_build_status_payload(
     const esp_openclaw_node_stickc_display_t *display,
     char **out_payload_json);
+
+/**
+ * @brief Update the OpenClaw gateway state shown in the status footer.
+ *
+ * Safe to call from the node event callback.  The footer label itself is
+ * repainted by the display's own refresh timer within ~1 second.
+ *
+ * @param[in,out] display Initialized display state.
+ * @param[in] state Current gateway session state.
+ */
+void esp_openclaw_node_stickc_display_set_gateway_state(
+    esp_openclaw_node_stickc_display_t *display,
+    esp_openclaw_node_stickc_gateway_state_t state);
+
+/**
+ * @brief Provide the device id to show in the status footer.
+ *
+ * Only the first @ref STICKC_DISPLAY_NODE_ID_LEN characters are kept.
+ * Intended to be called once after the node handle is created.
+ *
+ * @param[in,out] display Initialized display state.
+ * @param[in] node_id Device id string, or `NULL` to clear it.
+ */
+void esp_openclaw_node_stickc_display_set_node_id(
+    esp_openclaw_node_stickc_display_t *display,
+    const char *node_id);
