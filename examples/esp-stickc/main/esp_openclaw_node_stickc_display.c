@@ -46,6 +46,10 @@ static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw ga
 /* Buddy idle-animation frame interval. */
 #define STICKC_BUDDY_FRAME_MS 220
 
+/* How long the heading/text stay on screen after a button A press or a new
+ * display.show; after this they auto-hide so the buddy is alone again. */
+#define STICKC_MESSAGE_SHOW_MS 5000
+
 /* LVGL mutex: protects all lv_* calls from concurrent access between the
  * LVGL task and the OpenClaw command handler. */
 static SemaphoreHandle_t s_lvgl_mux = NULL;
@@ -321,10 +325,12 @@ esp_err_t esp_openclaw_node_stickc_display_render(
     snprintf(display->heading, sizeof(display->heading), "%s", heading);
     snprintf(display->text, sizeof(display->text), "%s", text);
     apply_render_locked(display);
-    stickc_lvgl_unlock();
-
     display->render_count += 1U;
     display->last_render_ms = esp_timer_get_time() / 1000LL;
+    /* Gateway messages reveal the heading/text line briefly, then auto-hide. */
+    display->message_visible_until_ms = display->last_render_ms + STICKC_MESSAGE_SHOW_MS;
+    stickc_lvgl_unlock();
+
     /* New content from the gateway wakes the screen. */
     stickc_set_backlight(display, true);
     return ESP_OK;
@@ -337,13 +343,15 @@ esp_err_t esp_openclaw_node_stickc_display_render(
 /* ASCII-art buddy frames.  Every line is padded to the same width so that
  * centre-aligning the label keeps the art block aligned. */
 static const char *const BUDDY_DUCK_IDLE =
-    "    _      \n"
-    " __(o)<    \n"
-    " \\___)     ";
+    "       _      \n"
+    "     _(o)_>   \n"
+    "    (______)  \n"
+    "  ~~~~~~~~~~  ";
 static const char *const BUDDY_DUCK_BLINK =
-    "    _      \n"
-    " __(-)<    \n"
-    " \\___)     ";
+    "       _      \n"
+    "     _(-)_>   \n"
+    "    (______)  \n"
+    "  ~~~~~~~~~~  ";
 
 /* Pick and draw the current buddy frame.  Must hold the LVGL lock. */
 static void buddy_animate_locked(esp_openclaw_node_stickc_display_t *display)
@@ -356,13 +364,35 @@ static void buddy_animate_locked(esp_openclaw_node_stickc_display_t *display)
     lv_label_set_text(display->buddy_label, blink ? BUDDY_DUCK_BLINK : BUDDY_DUCK_IDLE);
 }
 
-/* LVGL timer callback: advances the buddy animation. */
+/* LVGL timer callback: advances the buddy animation and reveals/hides the
+ * heading + text labels based on button presses and recent display.show. */
 static void buddy_timer_cb(lv_timer_t *timer)
 {
     esp_openclaw_node_stickc_display_t *display = lv_timer_get_user_data(timer);
-    if (display != NULL) {
-        display->buddy_tick += 1U;
-        buddy_animate_locked(display);
+    if (display == NULL) {
+        return;
+    }
+    display->buddy_tick += 1U;
+    buddy_animate_locked(display);
+
+    /* Button A reveals the heading/text line and wakes the screen. */
+    uint32_t a_now = esp_openclaw_node_stickc_button_press_count(0);
+    if (a_now != display->last_button_a_seen) {
+        display->last_button_a_seen = a_now;
+        const int64_t now_ms = esp_timer_get_time() / 1000LL;
+        display->message_visible_until_ms = now_ms + STICKC_MESSAGE_SHOW_MS;
+        display->last_render_ms = now_ms;
+        stickc_set_backlight(display, true);
+    }
+
+    /* Toggle the heading/text labels based on the visibility deadline. */
+    bool visible = (esp_timer_get_time() / 1000LL) <= display->message_visible_until_ms;
+    if (visible) {
+        lv_obj_clear_flag(display->heading_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(display->text_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(display->heading_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(display->text_label, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -416,6 +446,12 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
     lv_obj_set_style_text_color(display->text_label, lv_color_hex(0xcbd5e1), 0);
     lv_obj_set_style_text_line_space(display->text_label, 4, 0);
     lv_obj_set_style_text_font(display->text_label, &lv_font_montserrat_14, 0);
+
+    /* Hide the heading/text by default - the buddy owns the main screen.
+     * They appear for a few seconds when button A is pressed or when a
+     * display.show arrives from the gateway. */
+    lv_obj_add_flag(display->heading_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(display->text_label, LV_OBJ_FLAG_HIDDEN);
 
     /* Connection-warning footer.  Hidden while Wi-Fi and the gateway are both
      * up (the expected state); shown as a single amber line otherwise. */
@@ -641,6 +677,12 @@ esp_err_t esp_openclaw_node_stickc_display_run_menu(
     if (!stickc_lvgl_lock(1000)) {
         return ESP_ERR_TIMEOUT;
     }
+    /* The menu reuses heading/text labels, so make sure they're visible
+     * for the whole menu duration. */
+    lv_obj_clear_flag(display->heading_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(display->text_label, LV_OBJ_FLAG_HIDDEN);
+    display->message_visible_until_ms =
+        (esp_timer_get_time() / 1000LL) + (int64_t)timeout_ms + 2000;
     render_menu_locked(display, title, options, option_count, selected);
     stickc_set_backlight(display, true);
     stickc_lvgl_unlock();
@@ -668,9 +710,13 @@ esp_err_t esp_openclaw_node_stickc_display_run_menu(
         vTaskDelay(pdMS_TO_TICKS(STICKC_DISPLAY_MENU_POLL_MS));
     }
 
-    /* Restore the pre-menu screen (heading/text were never modified). */
+    /* Restore the pre-menu screen (heading/text were never modified) and
+     * snap the labels back to hidden so the buddy is alone again. */
     if (stickc_lvgl_lock(1000)) {
         apply_render_locked(display);
+        display->message_visible_until_ms = 0;
+        lv_obj_add_flag(display->heading_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(display->text_label, LV_OBJ_FLAG_HIDDEN);
         stickc_lvgl_unlock();
     }
 

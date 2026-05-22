@@ -67,6 +67,8 @@ typedef struct {
     lv_obj_t *status_label; /**< LVGL label for the connection-warning footer. */
     bool gateway_connected; /**< Whether the OpenClaw gateway session is currently up. */
     bool backlight_on; /**< Whether the LCD backlight is currently lit. */
+    int64_t message_visible_until_ms; /**< When the heading/text line should auto-hide. */
+    uint32_t last_button_a_seen; /**< Last button-A press count seen by the buddy timer. */
 } esp_openclaw_node_stickc_display_t;
 
 /**
