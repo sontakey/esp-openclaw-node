@@ -43,6 +43,9 @@ static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw ga
 /* How often display.menu samples the buttons while waiting for input. */
 #define STICKC_DISPLAY_MENU_POLL_MS 40
 
+/* Buddy idle-animation frame interval. */
+#define STICKC_BUDDY_FRAME_MS 220
+
 /* LVGL mutex: protects all lv_* calls from concurrent access between the
  * LVGL task and the OpenClaw command handler. */
 static SemaphoreHandle_t s_lvgl_mux = NULL;
@@ -327,6 +330,42 @@ esp_err_t esp_openclaw_node_stickc_display_render(
     return ESP_OK;
 }
 
+/* ---------------------------------------------------------------------- */
+/*  On-screen buddy character                                              */
+/* ---------------------------------------------------------------------- */
+
+/* ASCII-art buddy frames.  Every line is padded to the same width so that
+ * centre-aligning the label keeps the art block aligned. */
+static const char *const BUDDY_DUCK_IDLE =
+    "    _      \n"
+    " __(o)<    \n"
+    " \\___)     ";
+static const char *const BUDDY_DUCK_BLINK =
+    "    _      \n"
+    " __(-)<    \n"
+    " \\___)     ";
+
+/* Pick and draw the current buddy frame.  Must hold the LVGL lock. */
+static void buddy_animate_locked(esp_openclaw_node_stickc_display_t *display)
+{
+    if (display == NULL || display->buddy_label == NULL) {
+        return;
+    }
+    /* Blink for one frame roughly every 4 seconds. */
+    bool blink = (display->buddy_tick % 18U) == 17U;
+    lv_label_set_text(display->buddy_label, blink ? BUDDY_DUCK_BLINK : BUDDY_DUCK_IDLE);
+}
+
+/* LVGL timer callback: advances the buddy animation. */
+static void buddy_timer_cb(lv_timer_t *timer)
+{
+    esp_openclaw_node_stickc_display_t *display = lv_timer_get_user_data(timer);
+    if (display != NULL) {
+        display->buddy_tick += 1U;
+        buddy_animate_locked(display);
+    }
+}
+
 static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display)
 {
     lv_obj_t *screen = lv_scr_act();
@@ -353,6 +392,14 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
         LV_FLEX_ALIGN_START,
         LV_FLEX_ALIGN_START,
         LV_FLEX_ALIGN_START);
+
+    /* Animated ASCII buddy character: the centrepiece of the main screen. */
+    display->buddy_label = lv_label_create(display->container);
+    lv_obj_set_width(display->buddy_label, lv_pct(100));
+    lv_obj_set_style_text_color(display->buddy_label, lv_color_hex(0xfacc15), 0);
+    lv_obj_set_style_text_font(display->buddy_label, &lv_font_unscii_16, 0);
+    lv_obj_set_style_text_align(display->buddy_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(display->buddy_label, BUDDY_DUCK_IDLE);
 
     display->heading_label = lv_label_create(display->container);
     lv_obj_set_width(display->heading_label, lv_pct(100));
@@ -509,6 +556,7 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     apply_render_locked(display);
     refresh_status_footer_locked(display);
     lv_timer_create(status_refresh_timer_cb, STICKC_STATUS_REFRESH_MS, display);
+    lv_timer_create(buddy_timer_cb, STICKC_BUDDY_FRAME_MS, display);
     stickc_lvgl_unlock();
 
     display->render_count = 1U;
