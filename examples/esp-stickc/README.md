@@ -33,7 +33,8 @@ The M5StickC Plus2 display can appear blank for three common reasons, all of whi
 
 ## What This Example Exposes
 
-Capabilities: `device`, `wifi`, `display`, `imu`, `buzzer`, `led`, `battery`
+Capabilities: `device`, `wifi`, `display`, `imu`, `buzzer`, `led`, `battery`,
+`button`, `motion`
 
 Commands:
 
@@ -46,6 +47,8 @@ Commands:
 - `buzzer.beep`
 - `led.set`
 - `battery.status`
+- `button.status`
+- `motion.status`
 
 ## Hardware Commands
 
@@ -59,6 +62,8 @@ peripherals as OpenClaw commands. Invoke them with
 | `buzzer.beep` | `frequency` Hz (100-10000, default 4000), `durationMs` (1-1000, default 200) | the clamped `frequency` and `durationMs` actually used |
 | `led.set` | `on` (boolean, required) | the resulting `on` state |
 | `battery.status` | none | `millivolts`, `volts`, `percent` (rough 3.0-4.2 V curve), `raw` ADC |
+| `button.status` | none | per button `a`/`b`: `pressed` plus `pressCount` (cumulative since boot - diff it between polls) |
+| `motion.status` | none | `orientation`, `pitchDeg`, `rollDeg`, `moving` - derived from the IMU |
 
 Examples:
 
@@ -67,6 +72,8 @@ openclaw nodes invoke --node <id> --command imu.read --json
 openclaw nodes invoke --node <id> --command buzzer.beep --params '{"frequency":3000,"durationMs":300}' --json
 openclaw nodes invoke --node <id> --command led.set --params '{"on":true}' --json
 openclaw nodes invoke --node <id> --command battery.status --json
+openclaw nodes invoke --node <id> --command button.status --json
+openclaw nodes invoke --node <id> --command motion.status --json
 ```
 
 Peripheral bring-up is best-effort: if the IMU or battery ADC fails to

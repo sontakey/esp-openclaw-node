@@ -6,6 +6,7 @@
 
 #include "esp_openclaw_node_stickc_hw_node_cmd.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -73,6 +74,17 @@ static const char *TAG = "stickc_hw";
 #define STICKC_HW_BATTERY_EMPTY_MV 3000
 #define STICKC_HW_BATTERY_SAMPLES  16
 
+/* Buttons A and B.  GPIO37/39 are input-only with no internal pulls; the
+ * board has external pull-ups, so a pressed button reads LOW. */
+#define STICKC_HW_BTN_A_GPIO       GPIO_NUM_37
+#define STICKC_HW_BTN_B_GPIO       GPIO_NUM_39
+#define STICKC_HW_BTN_COUNT        2
+#define STICKC_HW_BTN_POLL_MS      20
+
+/* motion.status derived from the IMU. */
+#define STICKC_HW_RAD_TO_DEG       57.295779f
+#define STICKC_HW_MOTION_MOVING_DPS 40.0 /* gyro magnitude above this = moving */
+
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_imu_dev;
 static adc_oneshot_unit_handle_t s_adc;
@@ -80,6 +92,19 @@ static adc_cali_handle_t s_adc_cali;
 static bool s_imu_ready;
 static bool s_adc_ready;
 static bool s_adc_cali_ready;
+
+/* Button debounce state: updated by button_task(), read by handle_button_status().
+ * press_count is cumulative since boot so a polling gateway can diff it. */
+typedef struct {
+    gpio_num_t gpio;
+    volatile bool pressed;
+    volatile uint32_t press_count;
+} stickc_button_t;
+static stickc_button_t s_buttons[STICKC_HW_BTN_COUNT] = {
+    {.gpio = STICKC_HW_BTN_A_GPIO},
+    {.gpio = STICKC_HW_BTN_B_GPIO},
+};
+static bool s_buttons_ready;
 
 /* ---------------------------------------------------------------------- */
 /*  Peripheral bring-up (best-effort)                                     */
@@ -213,6 +238,48 @@ static void init_battery(void)
     }
 #endif
     ESP_LOGI(TAG, "battery ADC ready");
+}
+
+/* Polls both buttons every STICKC_HW_BTN_POLL_MS, debounces (two matching
+ * samples), and counts release->press edges. */
+static void button_task(void *arg)
+{
+    (void)arg;
+    bool last[STICKC_HW_BTN_COUNT] = {false};
+    for (;;) {
+        for (int i = 0; i < STICKC_HW_BTN_COUNT; ++i) {
+            bool now = gpio_get_level(s_buttons[i].gpio) == 0; /* active low */
+            if (now == last[i] && now != s_buttons[i].pressed) {
+                s_buttons[i].pressed = now;
+                if (now) {
+                    s_buttons[i].press_count += 1U;
+                }
+            }
+            last[i] = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(STICKC_HW_BTN_POLL_MS));
+    }
+}
+
+static void init_buttons(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << STICKC_HW_BTN_A_GPIO) | (1ULL << STICKC_HW_BTN_B_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&io_conf) != ESP_OK) {
+        ESP_LOGW(TAG, "button GPIO config failed; button.status disabled");
+        return;
+    }
+    if (xTaskCreate(button_task, "stickc_btn", 2560, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "button task create failed; button.status disabled");
+        return;
+    }
+    s_buttons_ready = true;
+    ESP_LOGI(TAG, "buttons ready");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -436,6 +503,100 @@ static esp_err_t handle_battery_status(
     return esp_openclaw_node_example_take_json_payload(payload, out_payload_json);
 }
 
+static esp_err_t handle_button_status(
+    esp_openclaw_node_handle_t node,
+    void *context,
+    const char *params_json,
+    size_t params_len,
+    char **out_payload_json,
+    esp_openclaw_node_error_t *out_error)
+{
+    (void)node;
+    (void)context;
+    (void)params_json;
+    (void)params_len;
+
+    if (!s_buttons_ready) {
+        out_error->code = "UNAVAILABLE";
+        out_error->message = "buttons are not available";
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    if (payload == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    /* pressCount is cumulative since boot; the gateway diffs it between polls. */
+    static const char *const names[STICKC_HW_BTN_COUNT] = {"a", "b"};
+    for (int i = 0; i < STICKC_HW_BTN_COUNT; ++i) {
+        cJSON *button = cJSON_AddObjectToObject(payload, names[i]);
+        cJSON_AddBoolToObject(button, "pressed", s_buttons[i].pressed);
+        cJSON_AddNumberToObject(button, "pressCount", s_buttons[i].press_count);
+    }
+    return esp_openclaw_node_example_take_json_payload(payload, out_payload_json);
+}
+
+static esp_err_t handle_motion_status(
+    esp_openclaw_node_handle_t node,
+    void *context,
+    const char *params_json,
+    size_t params_len,
+    char **out_payload_json,
+    esp_openclaw_node_error_t *out_error)
+{
+    (void)node;
+    (void)context;
+    (void)params_json;
+    (void)params_len;
+
+    if (!s_imu_ready) {
+        out_error->code = "UNAVAILABLE";
+        out_error->message = "IMU is not available";
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t raw[14] = {0};
+    if (mpu6886_read(MPU6886_REG_ACCEL_XOUT_H, raw, sizeof(raw)) != ESP_OK) {
+        out_error->code = "UNAVAILABLE";
+        out_error->message = "IMU read failed";
+        return ESP_FAIL;
+    }
+    const double accel_lsb = MPU6886_ACCEL_FS_G / 32768.0;
+    const double gyro_lsb = MPU6886_GYRO_FS_DPS / 32768.0;
+    double ax = (int16_t)((raw[0] << 8) | raw[1]) * accel_lsb;
+    double ay = (int16_t)((raw[2] << 8) | raw[3]) * accel_lsb;
+    double az = (int16_t)((raw[4] << 8) | raw[5]) * accel_lsb;
+    double gx = (int16_t)((raw[8] << 8) | raw[9]) * gyro_lsb;
+    double gy = (int16_t)((raw[10] << 8) | raw[11]) * gyro_lsb;
+    double gz = (int16_t)((raw[12] << 8) | raw[13]) * gyro_lsb;
+
+    /* Tilt from the gravity vector; "moving" from the gyro magnitude. */
+    double pitch = atan2(-ax, sqrt(ay * ay + az * az)) * STICKC_HW_RAD_TO_DEG;
+    double roll = atan2(ay, az) * STICKC_HW_RAD_TO_DEG;
+    double gyro_mag = sqrt(gx * gx + gy * gy + gz * gz);
+
+    const char *orientation;
+    if (az > 0.7) {
+        orientation = "faceUp";
+    } else if (az < -0.7) {
+        orientation = "faceDown";
+    } else if (ax > 0.7 || ax < -0.7) {
+        orientation = "onSide";
+    } else {
+        orientation = "upright";
+    }
+
+    cJSON *payload = cJSON_CreateObject();
+    if (payload == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    cJSON_AddStringToObject(payload, "orientation", orientation);
+    cJSON_AddNumberToObject(payload, "pitchDeg", pitch);
+    cJSON_AddNumberToObject(payload, "rollDeg", roll);
+    cJSON_AddBoolToObject(payload, "moving", gyro_mag > STICKC_HW_MOTION_MOVING_DPS);
+    return esp_openclaw_node_example_take_json_payload(payload, out_payload_json);
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Registration                                                          */
 /* ---------------------------------------------------------------------- */
@@ -446,6 +607,7 @@ esp_err_t esp_openclaw_node_stickc_register_hw_node_commands(esp_openclaw_node_h
     init_buzzer();
     init_led();
     init_battery();
+    init_buttons();
 
     static const esp_openclaw_node_command_t IMU_READ_COMMAND = {
         .name = "imu.read",
@@ -467,6 +629,16 @@ esp_err_t esp_openclaw_node_stickc_register_hw_node_commands(esp_openclaw_node_h
         .handler = handle_battery_status,
         .context = NULL,
     };
+    static const esp_openclaw_node_command_t BUTTON_STATUS_COMMAND = {
+        .name = "button.status",
+        .handler = handle_button_status,
+        .context = NULL,
+    };
+    static const esp_openclaw_node_command_t MOTION_STATUS_COMMAND = {
+        .name = "motion.status",
+        .handler = handle_motion_status,
+        .context = NULL,
+    };
 
     ESP_RETURN_ON_ERROR(esp_openclaw_node_register_capability(node, "imu"),
                         TAG, "registering imu capability failed");
@@ -484,5 +656,13 @@ esp_err_t esp_openclaw_node_stickc_register_hw_node_commands(esp_openclaw_node_h
                         TAG, "registering battery capability failed");
     ESP_RETURN_ON_ERROR(esp_openclaw_node_register_command(node, &BATTERY_STATUS_COMMAND),
                         TAG, "registering battery.status failed");
+    ESP_RETURN_ON_ERROR(esp_openclaw_node_register_capability(node, "button"),
+                        TAG, "registering button capability failed");
+    ESP_RETURN_ON_ERROR(esp_openclaw_node_register_command(node, &BUTTON_STATUS_COMMAND),
+                        TAG, "registering button.status failed");
+    ESP_RETURN_ON_ERROR(esp_openclaw_node_register_capability(node, "motion"),
+                        TAG, "registering motion capability failed");
+    ESP_RETURN_ON_ERROR(esp_openclaw_node_register_command(node, &MOTION_STATUS_COMMAND),
+                        TAG, "registering motion.status failed");
     return ESP_OK;
 }
