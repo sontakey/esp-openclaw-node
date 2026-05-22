@@ -340,28 +340,24 @@ esp_err_t esp_openclaw_node_stickc_display_render(
 /*  On-screen buddy character                                              */
 /* ---------------------------------------------------------------------- */
 
-/* ASCII-art buddy frames.  Every line is padded to the same width so that
- * centre-aligning the label keeps the art block aligned. */
-static const char *const BUDDY_DUCK_IDLE =
-    "       _      \n"
-    "     _(o)_>   \n"
-    "    (______)  \n"
-    "  ~~~~~~~~~~  ";
-static const char *const BUDDY_DUCK_BLINK =
-    "       _      \n"
-    "     _(-)_>   \n"
-    "    (______)  \n"
-    "  ~~~~~~~~~~  ";
+/* Buddy colours. */
+#define STICKC_BUDDY_BODY_COLOR  0xfacc15 /* duck yellow */
+#define STICKC_BUDDY_BEAK_COLOR  0xf97316 /* orange beak */
+#define STICKC_BUDDY_EYE_COLOR   0x0f172a /* dark navy, blends with bg */
 
-/* Pick and draw the current buddy frame.  Must hold the LVGL lock. */
+/* Blink by hiding the eye briefly.  Must hold the LVGL lock. */
 static void buddy_animate_locked(esp_openclaw_node_stickc_display_t *display)
 {
-    if (display == NULL || display->buddy_label == NULL) {
+    if (display == NULL || display->buddy_eye == NULL) {
         return;
     }
     /* Blink for one frame roughly every 4 seconds. */
     bool blink = (display->buddy_tick % 18U) == 17U;
-    lv_label_set_text(display->buddy_label, blink ? BUDDY_DUCK_BLINK : BUDDY_DUCK_IDLE);
+    if (blink) {
+        lv_obj_add_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 /* LVGL timer callback: advances the buddy animation and reveals/hides the
@@ -423,13 +419,55 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
         LV_FLEX_ALIGN_START,
         LV_FLEX_ALIGN_START);
 
-    /* Animated ASCII buddy character: the centrepiece of the main screen. */
-    display->buddy_label = lv_label_create(display->container);
-    lv_obj_set_width(display->buddy_label, lv_pct(100));
-    lv_obj_set_style_text_color(display->buddy_label, lv_color_hex(0xfacc15), 0);
-    lv_obj_set_style_text_font(display->buddy_label, &lv_font_unscii_16, 0);
-    lv_obj_set_style_text_align(display->buddy_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(display->buddy_label, BUDDY_DUCK_IDLE);
+    /* Drawn buddy character: yellow body + head + orange beak + dark eye.
+     * Positions are absolute inside the buddy container so the duck reads
+     * as one coherent shape rather than four widgets in a flex row. */
+    display->buddy = lv_obj_create(display->container);
+    lv_obj_set_size(display->buddy, lv_pct(100), 90);
+    lv_obj_set_style_bg_opa(display->buddy, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(display->buddy, 0, 0);
+    lv_obj_set_style_pad_all(display->buddy, 0, 0);
+    lv_obj_clear_flag(display->buddy, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *buddy_body = lv_obj_create(display->buddy);
+    lv_obj_set_size(buddy_body, 90, 38);
+    lv_obj_set_pos(buddy_body, 14, 35);
+    lv_obj_set_style_bg_color(buddy_body, lv_color_hex(STICKC_BUDDY_BODY_COLOR), 0);
+    lv_obj_set_style_bg_opa(buddy_body, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(buddy_body, 19, 0); /* capsule */
+    lv_obj_set_style_border_width(buddy_body, 0, 0);
+    lv_obj_set_style_pad_all(buddy_body, 0, 0);
+    lv_obj_clear_flag(buddy_body, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *buddy_head = lv_obj_create(display->buddy);
+    lv_obj_set_size(buddy_head, 35, 35);
+    lv_obj_set_pos(buddy_head, 64, 12);
+    lv_obj_set_style_bg_color(buddy_head, lv_color_hex(STICKC_BUDDY_BODY_COLOR), 0);
+    lv_obj_set_style_bg_opa(buddy_head, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(buddy_head, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(buddy_head, 0, 0);
+    lv_obj_set_style_pad_all(buddy_head, 0, 0);
+    lv_obj_clear_flag(buddy_head, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *buddy_beak = lv_obj_create(display->buddy);
+    lv_obj_set_size(buddy_beak, 18, 8);
+    lv_obj_set_pos(buddy_beak, 98, 26);
+    lv_obj_set_style_bg_color(buddy_beak, lv_color_hex(STICKC_BUDDY_BEAK_COLOR), 0);
+    lv_obj_set_style_bg_opa(buddy_beak, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(buddy_beak, 3, 0);
+    lv_obj_set_style_border_width(buddy_beak, 0, 0);
+    lv_obj_set_style_pad_all(buddy_beak, 0, 0);
+    lv_obj_clear_flag(buddy_beak, LV_OBJ_FLAG_SCROLLABLE);
+
+    display->buddy_eye = lv_obj_create(display->buddy);
+    lv_obj_set_size(display->buddy_eye, 6, 6);
+    lv_obj_set_pos(display->buddy_eye, 80, 22);
+    lv_obj_set_style_bg_color(display->buddy_eye, lv_color_hex(STICKC_BUDDY_EYE_COLOR), 0);
+    lv_obj_set_style_bg_opa(display->buddy_eye, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(display->buddy_eye, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(display->buddy_eye, 0, 0);
+    lv_obj_set_style_pad_all(display->buddy_eye, 0, 0);
+    lv_obj_clear_flag(display->buddy_eye, LV_OBJ_FLAG_SCROLLABLE);
 
     display->heading_label = lv_label_create(display->container);
     lv_obj_set_width(display->heading_label, lv_pct(100));

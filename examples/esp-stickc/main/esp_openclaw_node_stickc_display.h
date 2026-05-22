@@ -60,7 +60,8 @@ typedef struct {
     int64_t last_render_ms; /**< Timestamp of the most recent render in ms since boot. */
     lv_display_t *lv_display; /**< Underlying LVGL display handle owned by the example. */
     lv_obj_t *container; /**< Root LVGL container for the example screen. */
-    lv_obj_t *buddy_label; /**< LVGL label showing the animated ASCII buddy character. */
+    lv_obj_t *buddy; /**< Container holding the drawn buddy character (body, head, eye, beak). */
+    lv_obj_t *buddy_eye; /**< Eye object on the buddy, hidden briefly to blink. */
     uint32_t buddy_tick; /**< Frame counter driving the buddy's idle animation. */
     lv_obj_t *heading_label; /**< LVGL label used for the heading line. */
     lv_obj_t *text_label; /**< LVGL label used for the body text block. */
