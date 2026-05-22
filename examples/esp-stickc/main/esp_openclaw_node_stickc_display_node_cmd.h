@@ -26,5 +26,3 @@
 esp_err_t esp_openclaw_node_stickc_register_display_node_commands(
     esp_openclaw_node_handle_t node,
     esp_openclaw_node_stickc_display_t *display);
-HEOFEOF
-cat esp_openclaw_node_stickc_display_node_cmd.h | head -3
