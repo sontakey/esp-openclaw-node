@@ -341,22 +341,39 @@ esp_err_t esp_openclaw_node_stickc_display_render(
 /* ---------------------------------------------------------------------- */
 
 /* Buddy colours. */
-#define STICKC_BUDDY_BODY_COLOR  0xfacc15 /* duck yellow */
-#define STICKC_BUDDY_BEAK_COLOR  0xf97316 /* orange beak */
-#define STICKC_BUDDY_EYE_COLOR   0x0f172a /* dark navy, blends with bg */
+#define STICKC_BUDDY_BODY_COLOR    0xfacc15 /* duck yellow */
+#define STICKC_BUDDY_WING_COLOR    0xeab308 /* slightly darker yellow */
+#define STICKC_BUDDY_WING_OUTLINE  0xa16207 /* brown outline so the wing reads */
+#define STICKC_BUDDY_BEAK_COLOR    0xf97316 /* orange beak */
+#define STICKC_BUDDY_EYE_COLOR     0x0f172a /* dark navy, blends with bg */
 
-/* Blink by hiding the eye briefly.  Must hold the LVGL lock. */
+/* Drive the buddy's idle animation: blink, bob like floating on water, and
+ * an occasional wing flap.  Must hold the LVGL lock. */
 static void buddy_animate_locked(esp_openclaw_node_stickc_display_t *display)
 {
-    if (display == NULL || display->buddy_eye == NULL) {
+    if (display == NULL || display->buddy == NULL) {
         return;
     }
-    /* Blink for one frame roughly every 4 seconds. */
-    bool blink = (display->buddy_tick % 18U) == 17U;
-    if (blink) {
-        lv_obj_add_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_clear_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
+    const uint32_t t = display->buddy_tick;
+
+    /* Subtle bob: the whole duck slides up 2 px, then back. */
+    int bob = ((t / 4U) % 2U) ? 0 : -2;
+    lv_obj_set_style_translate_y(display->buddy, bob, 0);
+
+    /* Wing flap: lift the wing 4 px for two frames every ~4 s. */
+    if (display->buddy_wing != NULL) {
+        bool wing_up = (t % 20U) == 5U || (t % 20U) == 6U;
+        lv_obj_set_style_translate_y(display->buddy_wing, wing_up ? -4 : 0, 0);
+    }
+
+    /* Blink: hide the eye for one frame roughly every 4 s. */
+    if (display->buddy_eye != NULL) {
+        bool blink = (t % 18U) == 17U;
+        if (blink) {
+            lv_obj_add_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(display->buddy_eye, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -438,6 +455,20 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
     lv_obj_set_style_border_width(buddy_body, 0, 0);
     lv_obj_set_style_pad_all(buddy_body, 0, 0);
     lv_obj_clear_flag(buddy_body, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Wing: a smaller, slightly-darker capsule sitting on the body, with a
+     * thin outline so it reads as a separate shape.  Drawn before the head
+     * so the head covers any overlap; animated up briefly for a flap. */
+    display->buddy_wing = lv_obj_create(display->buddy);
+    lv_obj_set_size(display->buddy_wing, 42, 22);
+    lv_obj_set_pos(display->buddy_wing, 28, 42);
+    lv_obj_set_style_bg_color(display->buddy_wing, lv_color_hex(STICKC_BUDDY_WING_COLOR), 0);
+    lv_obj_set_style_bg_opa(display->buddy_wing, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(display->buddy_wing, 11, 0);
+    lv_obj_set_style_border_color(display->buddy_wing, lv_color_hex(STICKC_BUDDY_WING_OUTLINE), 0);
+    lv_obj_set_style_border_width(display->buddy_wing, 1, 0);
+    lv_obj_set_style_pad_all(display->buddy_wing, 0, 0);
+    lv_obj_clear_flag(display->buddy_wing, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *buddy_head = lv_obj_create(display->buddy);
     lv_obj_set_size(buddy_head, 35, 35);

@@ -62,6 +62,7 @@ typedef struct {
     lv_obj_t *container; /**< Root LVGL container for the example screen. */
     lv_obj_t *buddy; /**< Container holding the drawn buddy character (body, head, eye, beak). */
     lv_obj_t *buddy_eye; /**< Eye object on the buddy, hidden briefly to blink. */
+    lv_obj_t *buddy_wing; /**< Wing object on the buddy, translated to animate flap. */
     uint32_t buddy_tick; /**< Frame counter driving the buddy's idle animation. */
     lv_obj_t *heading_label; /**< LVGL label used for the heading line. */
     lv_obj_t *text_label; /**< LVGL label used for the body text block. */
