@@ -107,6 +107,13 @@ The footer is re-evaluated once per second from the live Wi-Fi state and the
 node connect/disconnect events. `display.show` content from the gateway fills
 the area above it.
 
+## Power Saving
+
+For battery use the LCD backlight - the dominant power draw - is turned off
+after 30 seconds with no new content (`STICKC_BACKLIGHT_IDLE_TIMEOUT_MS`). The
+node stays connected; the next `display.show` from the gateway lights the
+screen again. Wi-Fi modem sleep (`WIFI_PS_MIN_MODEM`) is on by ESP-IDF default.
+
 ## Prepare The Gateway
 
 If the board will connect over Wi-Fi to a gateway running on another machine, set `gateway.bind` to `lan` first. The default loopback bind is only reachable from the gateway host itself.

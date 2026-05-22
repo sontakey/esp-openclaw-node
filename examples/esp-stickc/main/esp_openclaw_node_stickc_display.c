@@ -34,6 +34,11 @@ static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw ga
 /* How often the status footer is repainted from live Wi-Fi/gateway state. */
 #define STICKC_STATUS_REFRESH_MS 1000
 
+/* Blank the LCD backlight after this long with no new content, to save
+ * battery when the device is carried around.  Any display.show from the
+ * gateway turns it back on.  The backlight LED is the dominant power draw. */
+#define STICKC_BACKLIGHT_IDLE_TIMEOUT_MS 30000
+
 /* LVGL mutex: protects all lv_* calls from concurrent access between the
  * LVGL task and the OpenClaw command handler. */
 static SemaphoreHandle_t s_lvgl_mux = NULL;
@@ -93,6 +98,14 @@ static esp_err_t init_lcd_backlight(void)
     ESP_RETURN_ON_ERROR(gpio_set_level(STICKC_LCD_PIN_BL, 1), TAG, "backlight set HIGH failed");
     ESP_LOGI(TAG, "LCD backlight GPIO%d turned ON", STICKC_LCD_PIN_BL);
     return ESP_OK;
+}
+
+/* Drive the LCD backlight and remember its state.  Touches only a GPIO, so
+ * it is safe to call from any task. */
+static void stickc_set_backlight(esp_openclaw_node_stickc_display_t *display, bool on)
+{
+    gpio_set_level(STICKC_LCD_PIN_BL, on ? 1 : 0);
+    display->backlight_on = on;
 }
 
 /* esp_lcd panel-IO callback: fired from the SPI DMA ISR when a colour
@@ -305,6 +318,8 @@ esp_err_t esp_openclaw_node_stickc_display_render(
 
     display->render_count += 1U;
     display->last_render_ms = esp_timer_get_time() / 1000LL;
+    /* New content from the gateway wakes the screen. */
+    stickc_set_backlight(display, true);
     return ESP_OK;
 }
 
@@ -392,10 +407,19 @@ static void refresh_status_footer_locked(esp_openclaw_node_stickc_display_t *dis
 }
 
 /* LVGL timer callback: runs inside lv_timer_handler(), already under the
- * LVGL lock, so it can repaint the footer directly. */
+ * LVGL lock, so it can repaint the footer directly.  Also blanks the
+ * backlight once the screen has been idle long enough. */
 static void status_refresh_timer_cb(lv_timer_t *timer)
 {
-    refresh_status_footer_locked(lv_timer_get_user_data(timer));
+    esp_openclaw_node_stickc_display_t *display = lv_timer_get_user_data(timer);
+    refresh_status_footer_locked(display);
+
+    if (display != NULL && display->backlight_on) {
+        int64_t idle_ms = esp_timer_get_time() / 1000LL - display->last_render_ms;
+        if (idle_ms > STICKC_BACKLIGHT_IDLE_TIMEOUT_MS) {
+            stickc_set_backlight(display, false);
+        }
+    }
 }
 
 esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_display_t *display)
@@ -438,6 +462,7 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
      * cause on the M5StickC Plus2: if GPIO27 is never driven HIGH the
      * panel stays dark even though it is rendering correctly. */
     ESP_RETURN_ON_ERROR(init_lcd_backlight(), TAG, "backlight init failed");
+    display->backlight_on = true;
 
     /* Allocate the LVGL draw buffer: CONFIG_STICKC_LCD_DRAW_BUF_HEIGHT rows
      * at 16 bits per pixel (RGB565).  The buffer is handed straight to the
