@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "esp_openclaw_node.h"
 
@@ -28,3 +30,13 @@
  *      - an ESP-IDF error code if capability or command registration fails
  */
 esp_err_t esp_openclaw_node_stickc_register_hw_node_commands(esp_openclaw_node_handle_t node);
+
+/**
+ * @brief Cumulative press count for a button since boot.
+ *
+ * Lets other modules (such as the display menu) poll for button input.
+ *
+ * @param[in] button `0` for button A, `1` for button B.
+ * @return Number of presses counted since boot, or `0` for an invalid index.
+ */
+uint32_t esp_openclaw_node_stickc_button_press_count(int button);

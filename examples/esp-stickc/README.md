@@ -43,6 +43,7 @@ Commands:
 - `wifi.status`
 - `display.show`
 - `display.status`
+- `display.menu`
 - `imu.read`
 - `buzzer.beep`
 - `led.set`
@@ -97,6 +98,24 @@ Sample payload:
 ```
 
 On boot, the body area shows a waiting message until the node is paired.
+
+## Interactive Menu
+
+`display.menu` turns the StickC into a physical confirm/choose device. It
+shows a title and a list of options, then **blocks** until the user picks one
+with the buttons — **A** moves the highlight, **B** confirms — or the timeout
+elapses.
+
+```bash
+openclaw nodes invoke --node <id> --command display.menu \
+  --params '{"title":"Deploy?","options":["Yes","No"],"timeoutMs":30000}' \
+  --invoke-timeout 35000 --json
+# -> {"timedOut":false,"selected":0,"label":"Yes"}   (or {"timedOut":true})
+```
+
+`options` is a 1-8 entry string array; `timeoutMs` is clamped to 1-120 s
+(default 30 s). Because the node only replies once the user answers, set the
+CLI `--invoke-timeout` higher than `timeoutMs`.
 
 ## Connection Warning Footer
 

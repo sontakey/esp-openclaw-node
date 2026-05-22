@@ -26,6 +26,7 @@
 #include "lvgl.h"
 #include "esp_openclaw_node_example_json.h"
 #include "esp_openclaw_node_wifi.h"
+#include "esp_openclaw_node_stickc_hw_node_cmd.h"
 
 static const char *TAG = "stickc_display";
 static const char *DEFAULT_HEADING = "OpenClaw";
@@ -38,6 +39,9 @@ static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw ga
  * battery when the device is carried around.  Any display.show from the
  * gateway turns it back on.  The backlight LED is the dominant power draw. */
 #define STICKC_BACKLIGHT_IDLE_TIMEOUT_MS 30000
+
+/* How often display.menu samples the buttons while waiting for input. */
+#define STICKC_DISPLAY_MENU_POLL_MS 40
 
 /* LVGL mutex: protects all lv_* calls from concurrent access between the
  * LVGL task and the OpenClaw command handler. */
@@ -537,4 +541,93 @@ void esp_openclaw_node_stickc_display_set_gateway_connected(
     /* A plain aligned store; the footer refresh timer picks it up on its
      * next tick, so no LVGL lock is needed here. */
     display->gateway_connected = connected;
+}
+
+/* Render the menu into the heading and body labels.  Must hold the LVGL lock.
+ * The selected option is marked with "> "; long options are truncated. */
+static void render_menu_locked(esp_openclaw_node_stickc_display_t *display,
+                               const char *title,
+                               const char *const *options,
+                               int option_count,
+                               int selected)
+{
+    lv_label_set_text(display->heading_label,
+                      (title != NULL && title[0] != '\0') ? title : "Menu");
+
+    char body[512];
+    size_t pos = 0;
+    for (int i = 0; i < option_count; ++i) {
+        int written = snprintf(body + pos, sizeof(body) - pos, "%s%.24s%s",
+                               (i == selected) ? "> " : "  ",
+                               options[i] != NULL ? options[i] : "",
+                               (i < option_count - 1) ? "\n" : "");
+        if (written < 0 || (size_t)written >= sizeof(body) - pos) {
+            break;
+        }
+        pos += (size_t)written;
+    }
+    lv_label_set_text(display->text_label, body);
+}
+
+esp_err_t esp_openclaw_node_stickc_display_run_menu(
+    esp_openclaw_node_stickc_display_t *display,
+    const char *title,
+    const char *const *options,
+    int option_count,
+    uint32_t timeout_ms,
+    int *out_selected)
+{
+    if (display == NULL || options == NULL || out_selected == NULL ||
+        option_count < 1) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!display->ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    *out_selected = -1;
+
+    int selected = 0;
+    uint32_t a_seen = esp_openclaw_node_stickc_button_press_count(0);
+    uint32_t b_seen = esp_openclaw_node_stickc_button_press_count(1);
+
+    if (!stickc_lvgl_lock(1000)) {
+        return ESP_ERR_TIMEOUT;
+    }
+    render_menu_locked(display, title, options, option_count, selected);
+    stickc_set_backlight(display, true);
+    stickc_lvgl_unlock();
+
+    const int64_t deadline = esp_timer_get_time() / 1000LL + (int64_t)timeout_ms;
+    bool chosen = false;
+    while (esp_timer_get_time() / 1000LL < deadline) {
+        uint32_t a = esp_openclaw_node_stickc_button_press_count(0);
+        uint32_t b = esp_openclaw_node_stickc_button_press_count(1);
+        if (b != b_seen) {
+            chosen = true; /* button B confirms */
+            break;
+        }
+        if (a != a_seen) {
+            /* button A advances the highlight, honouring fast multi-presses */
+            selected = (int)(((uint32_t)selected + (a - a_seen)) % (uint32_t)option_count);
+            a_seen = a;
+            if (stickc_lvgl_lock(1000)) {
+                render_menu_locked(display, title, options, option_count, selected);
+                stickc_lvgl_unlock();
+            }
+        }
+        /* Keep the screen lit while the menu is open. */
+        display->last_render_ms = esp_timer_get_time() / 1000LL;
+        vTaskDelay(pdMS_TO_TICKS(STICKC_DISPLAY_MENU_POLL_MS));
+    }
+
+    /* Restore the pre-menu screen (heading/text were never modified). */
+    if (stickc_lvgl_lock(1000)) {
+        apply_render_locked(display);
+        stickc_lvgl_unlock();
+    }
+
+    if (chosen) {
+        *out_selected = selected;
+    }
+    return ESP_OK;
 }

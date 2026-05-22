@@ -282,6 +282,14 @@ static void init_buttons(void)
     ESP_LOGI(TAG, "buttons ready");
 }
 
+uint32_t esp_openclaw_node_stickc_button_press_count(int button)
+{
+    if (button < 0 || button >= STICKC_HW_BTN_COUNT) {
+        return 0;
+    }
+    return s_buttons[button].press_count;
+}
+
 /* ---------------------------------------------------------------------- */
 /*  Command handlers                                                      */
 /* ---------------------------------------------------------------------- */

@@ -15,6 +15,8 @@
 #define STICKC_DISPLAY_MAX_HEADING_LEN 64
 /** @brief Maximum UTF-8 body length accepted by `display.show`. */
 #define STICKC_DISPLAY_MAX_TEXT_LEN 512
+/** @brief Maximum number of options accepted by `display.menu`. */
+#define STICKC_DISPLAY_MENU_MAX_OPTIONS 8
 
 /*
  * M5StickC Plus2 LCD hardware constants.
@@ -130,3 +132,32 @@ esp_err_t esp_openclaw_node_stickc_display_build_status_payload(
 void esp_openclaw_node_stickc_display_set_gateway_connected(
     esp_openclaw_node_stickc_display_t *display,
     bool connected);
+
+/**
+ * @brief Show a blocking, button-driven menu and return the chosen option.
+ *
+ * Renders @p title and @p options on the screen, then waits: button A
+ * advances the highlight, button B confirms.  Returns when an option is
+ * picked or @p timeout_ms elapses.  The previous screen is restored before
+ * returning.  Blocks the calling task for the duration.
+ *
+ * @param[in,out] display Initialized display state.
+ * @param[in] title Heading shown above the options (may be empty).
+ * @param[in] options Array of @p option_count option strings.
+ * @param[in] option_count Number of options (1..@ref STICKC_DISPLAY_MENU_MAX_OPTIONS).
+ * @param[in] timeout_ms How long to wait for a selection, in milliseconds.
+ * @param[out] out_selected Chosen option index, or `-1` if the menu timed out.
+ *
+ * @return
+ *      - `ESP_OK` once the menu closes (selection or timeout)
+ *      - `ESP_ERR_INVALID_ARG` if an argument is invalid
+ *      - `ESP_ERR_INVALID_STATE` if the display is not ready
+ *      - `ESP_ERR_TIMEOUT` if the LVGL lock cannot be acquired
+ */
+esp_err_t esp_openclaw_node_stickc_display_run_menu(
+    esp_openclaw_node_stickc_display_t *display,
+    const char *title,
+    const char *const *options,
+    int option_count,
+    uint32_t timeout_ms,
+    int *out_selected);
