@@ -92,8 +92,8 @@ static bool send_connect_request(
     cJSON_AddStringToObject(root, "method", "connect");
 
     cJSON *params = cJSON_CreateObject();
-    cJSON_AddNumberToObject(params, "minProtocol", 3);
-    cJSON_AddNumberToObject(params, "maxProtocol", 3);
+    cJSON_AddNumberToObject(params, "minProtocol", 4);
+    cJSON_AddNumberToObject(params, "maxProtocol", 4);
 
     cJSON *client = cJSON_CreateObject();
     cJSON_AddStringToObject(client, "id", node->config.client_id);
