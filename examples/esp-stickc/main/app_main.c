@@ -36,7 +36,7 @@ static void handle_node_event(
 
     if (event == ESP_OPENCLAW_NODE_EVENT_CONNECTED) {
         ESP_LOGI(TAG, "OpenClaw session connected");
-        esp_openclaw_node_stickc_display_set_gateway_state(&s_display, STICKC_GATEWAY_CONNECTED);
+        esp_openclaw_node_stickc_display_set_gateway_connected(&s_display, true);
     } else if (event == ESP_OPENCLAW_NODE_EVENT_CONNECT_FAILED) {
         const esp_openclaw_node_connect_failed_event_t *failed = event_data;
         ESP_LOGW(
@@ -45,7 +45,7 @@ static void handle_node_event(
             failed != NULL ? failed->reason : -1,
             failed != NULL ? esp_err_to_name(failed->local_err) : "n/a",
             failed != NULL && failed->gateway_detail_code != NULL ? failed->gateway_detail_code : "");
-        esp_openclaw_node_stickc_display_set_gateway_state(&s_display, STICKC_GATEWAY_OFFLINE);
+        esp_openclaw_node_stickc_display_set_gateway_connected(&s_display, false);
     } else if (event == ESP_OPENCLAW_NODE_EVENT_DISCONNECTED) {
         const esp_openclaw_node_disconnected_event_t *disconnected = event_data;
         ESP_LOGW(
@@ -53,7 +53,7 @@ static void handle_node_event(
             "OpenClaw disconnected: reason=%d local_err=%s",
             disconnected != NULL ? disconnected->reason : -1,
             disconnected != NULL ? esp_err_to_name(disconnected->local_err) : "n/a");
-        esp_openclaw_node_stickc_display_set_gateway_state(&s_display, STICKC_GATEWAY_OFFLINE);
+        esp_openclaw_node_stickc_display_set_gateway_connected(&s_display, false);
     }
 }
 
@@ -78,7 +78,6 @@ void app_main(void)
     node_config.event_user_ctx = &s_saved_session_reconnect;
     ESP_ERROR_CHECK(esp_openclaw_node_create(&node_config, &s_node));
     ESP_ERROR_CHECK(esp_openclaw_node_stickc_register_node_commands(s_node, &s_display));
-    esp_openclaw_node_stickc_display_set_node_id(&s_display, esp_openclaw_node_get_device_id(s_node));
     ESP_ERROR_CHECK(
         esp_openclaw_node_example_saved_session_reconnect_start(
             &s_saved_session_reconnect,

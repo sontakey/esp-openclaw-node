@@ -38,6 +38,18 @@ static const char *DEFAULT_TEXT = "Waiting for display.show from the OpenClaw ga
  * LVGL task and the OpenClaw command handler. */
 static SemaphoreHandle_t s_lvgl_mux = NULL;
 
+/* Binary semaphore: given by the SPI DMA done ISR, taken by the LVGL flush
+ * callback so it can wait for the transfer to finish before reporting the
+ * draw buffer as free.  A counting/binary semaphore (rather than LVGL's own
+ * `flushing` flag) avoids the lost-wakeup hang if the ISR fires before LVGL
+ * has finished bookkeeping for the flush. */
+static SemaphoreHandle_t s_flush_done = NULL;
+
+/* Upper bound on how long the flush callback waits for one SPI transfer.
+ * A full 135x20 chunk takes ~1 ms; the timeout is only a safety net so a
+ * missed completion degrades to a slow redraw instead of a watchdog reset. */
+#define STICKC_FLUSH_TIMEOUT_MS 100
+
 /* ---------------------------------------------------------------------- */
 /*  SPI bus and ST7789 LCD panel initialisation for the M5StickC Plus2     */
 /* ---------------------------------------------------------------------- */
@@ -84,20 +96,21 @@ static esp_err_t init_lcd_backlight(void)
 }
 
 /* esp_lcd panel-IO callback: fired from the SPI DMA ISR when a colour
- * transfer finishes.  It releases the LVGL draw buffer for reuse. */
+ * transfer finishes.  It wakes the flush callback waiting in lvgl_flush_cb(). */
 static bool notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t io,
                                     esp_lcd_panel_io_event_data_t *edata,
                                     void *user_ctx)
 {
     (void)io;
     (void)edata;
-    lv_display_flush_ready((lv_display_t *)user_ctx);
-    return false;
+    (void)user_ctx;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_flush_done, &higher_priority_task_woken);
+    return higher_priority_task_woken == pdTRUE;
 }
 
 static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
-                                  esp_lcd_panel_io_handle_t *out_io,
-                                  lv_display_t *lv_disp)
+                                  esp_lcd_panel_io_handle_t *out_io)
 {
     /* SPI bus configuration for the M5StickC Plus2 LCD. */
     spi_bus_config_t buscfg = {
@@ -122,7 +135,7 @@ static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
         .spi_mode = 0,
         .trans_queue_depth = 10,
         .on_color_trans_done = notify_lvgl_flush_ready,
-        .user_ctx = lv_disp,
+        .user_ctx = NULL,
     };
     esp_lcd_panel_io_handle_t io_handle = NULL;
     ESP_RETURN_ON_ERROR(
@@ -182,9 +195,11 @@ static esp_err_t create_lcd_panel(esp_lcd_panel_handle_t *out_panel,
 /* LVGL port flush callback: copies pixels from the LVGL buffer to the LCD.
  *
  * esp_lcd_panel_draw_bitmap() only *queues* an SPI DMA transfer; the pixels
- * are still being read out of px_map after it returns.  lv_display_flush_ready()
- * must therefore wait until the transfer actually completes, which is signalled
- * asynchronously by notify_lvgl_flush_ready() below. */
+ * are still being read out of px_map after it returns.  We block here on
+ * s_flush_done (given by the DMA done ISR) so the buffer is genuinely free
+ * before lv_display_flush_ready() is called.  Blocking - rather than letting
+ * LVGL spin on its own `flushing` flag - keeps the LVGL task off the CPU
+ * while the transfer runs and cannot lose the completion wakeup. */
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel = lv_display_get_user_data(disp);
@@ -196,6 +211,8 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     lv_draw_sw_rgb565_swap(px_map, px_count);
 
     esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(STICKC_FLUSH_TIMEOUT_MS));
+    lv_display_flush_ready(disp);
 }
 
 /* LVGL tick timer callback.  Called every 5 ms to keep lv_tick in sync. */
@@ -274,7 +291,10 @@ esp_err_t esp_openclaw_node_stickc_display_render(
     if (display == NULL || heading == NULL || text == NULL || !display->ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!stickc_lvgl_lock(0)) {
+    /* Wait briefly for the LVGL task to release the lock: a redraw plus its
+     * SPI flush is a few ms, so a short bounded wait keeps `display.show`
+     * reliable instead of failing the moment a refresh is in progress. */
+    if (!stickc_lvgl_lock(1000)) {
         return ESP_ERR_TIMEOUT;
     }
 
@@ -331,57 +351,44 @@ static void create_display_ui_locked(esp_openclaw_node_stickc_display_t *display
     lv_obj_set_style_text_line_space(display->text_label, 4, 0);
     lv_obj_set_style_text_font(display->text_label, &lv_font_montserrat_14, 0);
 
-    /* Always-on status footer: Wi-Fi, gateway link, signal, and node id. */
+    /* Connection-warning footer.  Hidden while Wi-Fi and the gateway are both
+     * up (the expected state); shown as a single amber line otherwise. */
     display->status_label = lv_label_create(display->container);
     lv_obj_set_width(display->status_label, lv_pct(100));
     lv_label_set_long_mode(display->status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_color(display->status_label, lv_color_hex(0x94a3b8), 0);
-    lv_obj_set_style_text_line_space(display->status_label, 2, 0);
+    lv_obj_set_style_text_color(display->status_label, lv_color_hex(0xfbbf24), 0);
     lv_obj_set_style_text_font(display->status_label, &lv_font_montserrat_14, 0);
-    /* A thin top rule separates the footer from the body text. */
+    /* A thin top rule separates the warning from the body text. */
     lv_obj_set_style_border_color(display->status_label, lv_color_hex(0x334155), 0);
     lv_obj_set_style_border_side(display->status_label, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(display->status_label, 1, 0);
     lv_obj_set_style_pad_top(display->status_label, 5, 0);
 }
 
-/* Repaint the status footer from live Wi-Fi state and the stored gateway
- * state.  Must be called with the LVGL lock held. */
+/* Update the connection-warning footer.  Must be called with the LVGL lock
+ * held.  The footer is hidden when Wi-Fi and the gateway are both up - the
+ * expected state - so the whole screen is free for content; otherwise it
+ * shows a single line naming whichever link is down.  Wi-Fi down implies the
+ * gateway is unreachable, so only the Wi-Fi warning is shown in that case. */
 static void refresh_status_footer_locked(esp_openclaw_node_stickc_display_t *display)
 {
     if (display == NULL || display->status_label == NULL) {
         return;
     }
 
-    esp_openclaw_node_wifi_status_t wifi;
-    esp_openclaw_node_wifi_get_status(&wifi);
-
-    const char *gateway;
-    switch (display->gateway_state) {
-    case STICKC_GATEWAY_CONNECTED:
-        gateway = "connected";
-        break;
-    case STICKC_GATEWAY_OFFLINE:
-        gateway = "offline";
-        break;
-    default:
-        gateway = "connecting";
-        break;
+    const char *warning = NULL;
+    if (!esp_openclaw_node_wifi_is_connected()) {
+        warning = "Wi-Fi not connected";
+    } else if (!display->gateway_connected) {
+        warning = "Gateway not connected";
     }
 
-    const char *node_id = display->node_id[0] != '\0' ? display->node_id : "-";
-
-    char footer[160];
-    if (wifi.connected) {
-        snprintf(footer, sizeof(footer),
-                 "Wi-Fi  %s\n%s  %d dBm\nGateway  %s\nNode %s",
-                 wifi.ssid, wifi.ip, wifi.rssi, gateway, node_id);
+    if (warning == NULL) {
+        lv_obj_add_flag(display->status_label, LV_OBJ_FLAG_HIDDEN);
     } else {
-        snprintf(footer, sizeof(footer),
-                 "Wi-Fi  offline\nGateway  %s\nNode %s",
-                 gateway, node_id);
+        lv_label_set_text(display->status_label, warning);
+        lv_obj_clear_flag(display->status_label, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(display->status_label, footer);
 }
 
 /* LVGL timer callback: runs inside lv_timer_handler(), already under the
@@ -399,10 +406,12 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
 
     memset(display, 0, sizeof(*display));
 
-    /* Create the LVGL mutex before any peripheral init. */
+    /* Create the LVGL mutex and the SPI flush semaphore before any peripheral
+     * init, so the panel IO callback and flush callback can rely on them. */
     s_lvgl_mux = xSemaphoreCreateMutex();
-    if (s_lvgl_mux == NULL) {
-        ESP_LOGE(TAG, "failed to create LVGL mutex");
+    s_flush_done = xSemaphoreCreateBinary();
+    if (s_lvgl_mux == NULL || s_flush_done == NULL) {
+        ESP_LOGE(TAG, "failed to create LVGL synchronization primitives");
         return ESP_ERR_NO_MEM;
     }
 
@@ -412,8 +421,7 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     /* Initialise the LVGL core.  This must run before any other lv_* call. */
     lv_init();
 
-    /* Create the LVGL display object up front: the LCD panel IO needs its
-     * handle as user_ctx so the SPI DMA callback can signal flush-complete. */
+    /* Create the LVGL display object. */
     lv_display_t *lv_disp = lv_display_create(STICKC_LCD_H_RES, STICKC_LCD_V_RES);
     if (lv_disp == NULL) {
         ESP_LOGE(TAG, "failed to create LVGL display");
@@ -423,7 +431,7 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     /* Create the ST7789 LCD panel with M5StickC Plus2 offsets. */
     esp_lcd_panel_handle_t lcd_panel = NULL;
     esp_lcd_panel_io_handle_t lcd_io = NULL;
-    ESP_RETURN_ON_ERROR(create_lcd_panel(&lcd_panel, &lcd_io, lv_disp), TAG, "LCD panel creation failed");
+    ESP_RETURN_ON_ERROR(create_lcd_panel(&lcd_panel, &lcd_io), TAG, "LCD panel creation failed");
 
     /* Turn the backlight on *before* starting LVGL so the user sees
      * something as early as possible.  This is a common blank-screen
@@ -458,16 +466,24 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
     display->lv_display = lv_disp;
     display->ready = true;
 
-    /* Render the initial UI and start the footer refresh timer under the
-     * LVGL lock. */
+    /* Build the UI, seed the boot screen, and start the footer refresh timer,
+     * all under the LVGL lock *before* the LVGL task exists.  Seeding the
+     * content here - rather than via a post-startup render() call - avoids a
+     * race against the task's first refresh. */
     if (!stickc_lvgl_lock(1000)) {
         ESP_LOGE(TAG, "LVGL lock timeout during initial UI render");
         return ESP_ERR_TIMEOUT;
     }
     create_display_ui_locked(display);
+    snprintf(display->heading, sizeof(display->heading), "%s", DEFAULT_HEADING);
+    snprintf(display->text, sizeof(display->text), "%s", DEFAULT_TEXT);
+    apply_render_locked(display);
     refresh_status_footer_locked(display);
     lv_timer_create(status_refresh_timer_cb, STICKC_STATUS_REFRESH_MS, display);
     stickc_lvgl_unlock();
+
+    display->render_count = 1U;
+    display->last_render_ms = esp_timer_get_time() / 1000LL;
 
     /* Start the LVGL task.  It calls lv_timer_handler() in a loop.
      * 8 KB of stack: LVGL 9 glyph rendering and flex layout overflow 4 KB. */
@@ -483,29 +499,17 @@ esp_err_t esp_openclaw_node_stickc_display_start(esp_openclaw_node_stickc_displa
         return ESP_FAIL;
     }
 
-    display->last_render_ms = 0;
-    return esp_openclaw_node_stickc_display_render(display, DEFAULT_HEADING, DEFAULT_TEXT);
+    return ESP_OK;
 }
 
-void esp_openclaw_node_stickc_display_set_gateway_state(
+void esp_openclaw_node_stickc_display_set_gateway_connected(
     esp_openclaw_node_stickc_display_t *display,
-    esp_openclaw_node_stickc_gateway_state_t state)
+    bool connected)
 {
     if (display == NULL) {
         return;
     }
-    /* A plain aligned-word store; the footer refresh timer picks it up on
-     * its next tick, so no LVGL lock is needed here. */
-    display->gateway_state = state;
-}
-
-void esp_openclaw_node_stickc_display_set_node_id(
-    esp_openclaw_node_stickc_display_t *display,
-    const char *node_id)
-{
-    if (display == NULL) {
-        return;
-    }
-    snprintf(display->node_id, sizeof(display->node_id), "%s",
-             node_id != NULL ? node_id : "");
+    /* A plain aligned store; the footer refresh timer picks it up on its
+     * next tick, so no LVGL lock is needed here. */
+    display->gateway_connected = connected;
 }

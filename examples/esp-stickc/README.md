@@ -63,20 +63,21 @@ Sample payload:
 
 On boot, the body area shows a waiting message until the node is paired.
 
-## Status Footer
+## Connection Warning Footer
 
-The bottom of the screen always shows a live status footer that the device
-renders on its own, with no gateway interaction required:
+The small screen is kept clear whenever things are working: when Wi-Fi **and**
+the gateway are both connected, nothing extra is shown and the whole screen is
+available for content.
 
-- **Wi-Fi** the connected SSID, or `offline`
-- the device IPv4 address and current signal strength in dBm
-- **Gateway** the OpenClaw session state: `connecting`, `connected`, or `offline`
-- **Node** the short device id (use `openclaw nodes status --json` for the full id)
+A single warning line appears at the bottom only when a link is down:
 
-Wi-Fi fields and signal strength refresh once per second; the gateway state
-updates from the node connect/disconnect events. `display.show` content from
-the gateway fills the area above the footer, so connection status stays
-visible at all times.
+- **Wi-Fi not connected** the station has no connection. The gateway is
+  unreachable in this state, so only this line is shown.
+- **Gateway not connected** Wi-Fi is up but the OpenClaw session is not.
+
+The footer is re-evaluated once per second from the live Wi-Fi state and the
+node connect/disconnect events. `display.show` content from the gateway fills
+the area above it.
 
 ## Prepare The Gateway
 
