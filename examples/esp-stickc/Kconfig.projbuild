@@ -1,0 +1,10 @@
+menu "OpenClaw Example"
+
+config STICKC_LCD_DRAW_BUF_HEIGHT
+    int "LCD draw buffer height in pixels"
+    default 20
+    help
+        Number of pixel rows to allocate for the LVGL draw buffer.
+        Higher values use more RAM but reduce display-tearing artifacts.
+
+endmenu
